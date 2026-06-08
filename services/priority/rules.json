@@ -1,0 +1,54 @@
+{
+  "_comment": "Reglas de prioridad configurables. Se recargan en caliente sin reiniciar.",
+  "_version": "1.0",
+
+  "critical": {
+    "label": "CRÍTICO",
+    "response_time_seconds": 180,
+    "color": "#FF0000",
+    "types": [
+      "secuestro",
+      "homicidio",
+      "tiroteo",
+      "explosion",
+      "robo_con_violencia",
+      "ataque_terrorista",
+      "rehenes"
+    ],
+    "reason": "Riesgo inmediato para la vida humana — respuesta en menos de 3 minutos"
+  },
+
+  "high": {
+    "label": "ALTO",
+    "response_time_seconds": 600,
+    "color": "#FF8C00",
+    "types": [
+      "incendio",
+      "accidente_grave",
+      "violencia_familiar",
+      "robo",
+      "agresion",
+      "accidente_vehicular",
+      "persona_herida"
+    ],
+    "reason": "Emergencia que requiere respuesta prioritaria — máximo 10 minutos"
+  },
+
+  "medium": {
+    "label": "MEDIO",
+    "response_time_seconds": 1800,
+    "color": "#FFD700",
+    "types": [
+      "vandalismo",
+      "ruido_excesivo",
+      "sospechoso",
+      "accidente_menor",
+      "pelea",
+      "persona_extraviada"
+    ],
+    "reason": "Situación que requiere atención — máximo 30 minutos"
+  },
+
+  "default_priority": "medium",
+  "default_reason": "Tipo de emergencia no catalogado — se asigna prioridad media por precaución"
+}

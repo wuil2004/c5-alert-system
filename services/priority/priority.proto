@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package priority;
+
+service PriorityService {
+  rpc ClassifyAlert (AlertRequest) returns (AlertResponse);
+}
+
+message AlertRequest {
+  string device_id    = 1;
+  string emergency_type = 2;
+  string zone         = 3;
+  double latitude     = 4;
+  double longitude    = 5;
+  string timestamp    = 6;
+}
+
+message AlertResponse {
+  string alert_id     = 1;
+  string priority     = 2;   // critical | high | medium
+  string reason       = 3;
+  string processed_at = 4;
+}

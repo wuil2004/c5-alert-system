@@ -1,0 +1,11 @@
+{
+  "name": "c5-reception",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mqtt": "^5.3.4",
+    "ioredis": "^5.3.2"
+  }
+}

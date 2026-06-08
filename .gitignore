@@ -1,0 +1,24 @@
+# --- Dependencias ---
+node_modules/
+package-lock.json
+
+# --- Docker & Bases de Datos (Datos persistentes) ---
+# No queremos subir los datos reales de la base de datos a Git
+postgres_master_data/
+postgres_replica_data/
+redis_data/
+mosquitto_data/
+
+# --- Archivos de sistema / temporales ---
+.DS_Store
+*.log
+.env
+.tmp/
+
+# --- Archivos de IDEs ---
+.vscode/
+.idea/
+
+# --- Archivos de configuraciones locales o pruebas ---
+# Si tienes algún archivo de configuración con contraseñas reales, exclúyelo
+*.local.json
