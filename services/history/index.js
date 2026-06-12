@@ -97,6 +97,29 @@ app.get("/alerts", async (req, res) => {
   }
 });
 
+// PATCH /alerts/:id/status — confirmar o marcar como falsa alarma
+app.patch("/alerts/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+    const allowed = ["confirmed", "false_alarm", "received"];
+    if (!allowed.includes(status))
+      return res.status(400).json({ error: `Status inválido. Permitidos: ${allowed.join(", ")}` });
+
+    const result = await masterPool.query(
+      "UPDATE alerts SET status = $1 WHERE id = $2 RETURNING *",
+      [status, req.params.id]
+    );
+
+    if (result.rowCount === 0)
+      return res.status(404).json({ error: "Alerta no encontrada" });
+
+    console.log(`[History] Alerta ${req.params.id} actualizada → ${status}`);
+    res.json({ message: "Status actualizado", alert: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /alerts/:id
 app.get("/alerts/:id", async (req, res) => {
   try {

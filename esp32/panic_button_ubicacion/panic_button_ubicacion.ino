@@ -5,8 +5,8 @@
 // ══════════════════════════════════════════════════════
 //  CONFIGURACIÓN Y PINES
 // ══════════════════════════════════════════════════════
-const char* WIFI_SSID       = "REDMI Note 15";
-const char* WIFI_PASSWORD   = "Yos1234#";
+const char* WIFI_SSID       = "Familia Matias";
+const char* WIFI_PASSWORD   = "2004Sistem;
 const char* MQTT_BROKER     = "10.113.201.11";
 const int   MQTT_PORT       = 1883;
 const char* MQTT_TOPIC      = "c5/alerts/panic";

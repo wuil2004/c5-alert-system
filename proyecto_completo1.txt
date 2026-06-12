@@ -1,0 +1,955 @@
+--- FICHERO: ./docker-compose.yaml ---
+version: "3.9"
+
+networks:
+  c5net:
+    driver: bridge
+
+volumes:
+  postgres_master_data:
+  postgres_replica_data:
+  redis_data:
+  mosquitto_data:
+
+services:
+
+  # ─────────────────────────────────────────────
+  # INFRAESTRUCTURA BASE
+  # ─────────────────────────────────────────────
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: c5_mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: c5_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  postgres_master:
+    image: postgres:15
+    container_name: c5_postgres_master
+    environment:
+      POSTGRES_USER: c5admin
+      POSTGRES_PASSWORD: c5secret
+      POSTGRES_DB: c5db
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: replicasecret
+    volumes:
+      - postgres_master_data:/var/lib/postgresql/data
+      - ./postgres/master-init.sh:/docker-entrypoint-initdb.d/master-init.sh
+    ports:
+      - "5432:5432"
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  postgres_replica:
+    image: postgres:15
+    container_name: c5_postgres_replica
+    environment:
+      POSTGRES_USER: c5admin
+      POSTGRES_PASSWORD: c5secret
+      PGPASSWORD: replicasecret
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+      - ./postgres/replica-init.sh:/docker-entrypoint-initdb.d/replica-init.sh
+    depends_on:
+      - postgres_master
+    ports:
+      - "5433:5432"
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MICROSERVICIO 1: RECEPCIÓN DE ALERTAS (x3 instancias)
+  # ─────────────────────────────────────────────
+
+  reception_1:
+    build: ./services/reception
+    container_name: c5_reception_1
+    environment:
+      - PORT=3001
+      - INSTANCE_ID=reception_1
+      - MQTT_BROKER=mqtt://mosquitto:1883
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mosquitto
+      - redis
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  reception_2:
+    build: ./services/reception
+    container_name: c5_reception_2
+    environment:
+      - PORT=3001
+      - INSTANCE_ID=reception_2
+      - MQTT_BROKER=mqtt://mosquitto:1883
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mosquitto
+      - redis
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  reception_3:
+    build: ./services/reception
+    container_name: c5_reception_3
+    environment:
+      - PORT=3001
+      - INSTANCE_ID=reception_3
+      - MQTT_BROKER=mqtt://mosquitto:1883
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mosquitto
+      - redis
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # NGINX: Balanceador de carga (least_conn)
+  # ─────────────────────────────────────────────
+
+  nginx:
+    image: nginx:alpine
+    container_name: c5_nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - reception_1
+      - reception_2
+      - reception_3
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MICROSERVICIO 2: GEOLOCALIZACIÓN
+  # ─────────────────────────────────────────────
+
+  geolocation:
+    build: ./services/geolocation
+    container_name: c5_geolocation
+    environment:
+      - PORT=3002
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MICROSERVICIO 3: ASIGNACIÓN DE PRIORIDAD (gRPC)
+  # ─────────────────────────────────────────────
+
+  priority:
+    build: ./services/priority
+    container_name: c5_priority
+    environment:
+      - GRPC_PORT=50051
+      - HTTP_PORT=3003
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./services/priority/rules.json:/app/rules.json
+    depends_on:
+      - redis
+    ports:
+      - "50051:50051"
+      - "3003:3003"
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MICROSERVICIO 4: NOTIFICACIONES (WebSocket)
+  # ─────────────────────────────────────────────
+
+  notifications:
+    build: ./services/notifications
+    container_name: c5_notifications
+    environment:
+      - PORT=3004
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    ports:
+      - "3004:3004"
+    networks:
+      - c5net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MICROSERVICIO 5: HISTORIAL DE INCIDENTES
+  # ─────────────────────────────────────────────
+
+  history:
+    build: ./services/history
+    container_name: c5_history
+    environment:
+      - PORT=3005
+      - DB_MASTER=postgres://c5admin:c5secret@postgres_master:5432/c5db
+      - DB_REPLICA=postgres://c5admin:c5secret@postgres_replica:5432/c5db
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres_master
+      - postgres_replica
+      - redis
+    ports:
+      - "3005:3005"
+    networks:
+      - c5net
+    restart: unless-stopped
+-e 
+
+--- FICHERO: ./README.md ---
+# 🚨 C5 - Sistema de Alerta Ciudadana Distribuido
+
+Sistema distribuido de alerta ciudadana tipo C5 con 5 microservicios independientes, ESP32, MQTT, gRPC, WebSockets y PostgreSQL con replicación.
+
+---
+
+## ⚡ Levantar todo el sistema (1 solo comando)
+
+```bash
+docker compose up --build
+```
+
+> ⚠️ La primera vez tarda ~3-5 minutos en descargar imágenes y construir los servicios.
+
+Para detener:
+```bash
+docker compose down
+```
+
+Para detener y borrar volúmenes (reset completo):
+```bash
+docker compose down -v
+```
+
+---
+
+## 📋 Prerequisitos
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (incluye Docker Compose)
+- Git
+
+```bash
+git clone <URL_DEL_REPO>
+cd c5-alert-system
+docker compose up --build
+```
+
+---
+
+## 🏗️ Servicios y puertos
+
+| Servicio | Puerto | Descripción |
+|---|---|---|
+| Nginx (LB) | `8080` | Balanceador de carga para Reception |
+| Reception x3 | (interno) | 3 instancias balanceadas |
+| Geolocation | (interno) | Procesamiento de coordenadas |
+| Priority | `50051` | Clasificación gRPC |
+| Notifications | `3004` | WebSocket para operadores |
+| History | `3005` | API REST historial |
+| Mosquitto MQTT | `1883` | Broker IoT |
+| Redis | `6379` | Cola de mensajes |
+| PostgreSQL Master | `5432` | Base de datos (escritura) |
+| PostgreSQL Réplica | `5433` | Base de datos (lectura) |
+
+---
+
+## 🧪 Probar el sistema
+
+### 1. Verificar que todos los servicios están corriendo
+
+```bash
+docker compose ps
+```
+
+Todos deben aparecer como `running`.
+
+### 2. Enviar una alerta de prueba (sin ESP32)
+
+```bash
+curl -X POST http://localhost:8080/alert \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "ESP32-TEST",
+    "latitude": 20.0527,
+    "longitude": -99.3467,
+    "emergency_type": "robo_con_violencia"
+  }'
+```
+
+### 3. Ver notificaciones en tiempo real (WebSocket)
+
+Abre en el navegador una consola JavaScript:
+```javascript
+const ws = new WebSocket("ws://localhost:3004");
+ws.onmessage = (e) => console.log("ALERTA:", JSON.parse(e.data));
+```
+
+O usa [Postman](https://www.postman.com/) → Nueva solicitud WebSocket → `ws://localhost:3004`
+
+### 4. Consultar el historial
+
+```bash
+# Todas las alertas
+curl http://localhost:3005/alerts
+
+# Filtrar por prioridad
+curl "http://localhost:3005/alerts?priority=critical"
+
+# Filtrar por zona y fecha
+curl "http://localhost:3005/alerts?zone=Centro&from=2024-01-01&to=2024-12-31"
+
+# Estadísticas
+curl http://localhost:3005/stats
+```
+
+### 5. Enviar alerta vía MQTT (simular ESP32)
+
+```bash
+# Si tienes mosquitto-clients instalado:
+mosquitto_pub -h localhost -p 1883 -t "c5/alerts/panic" \
+  -m '{"device_id":"SIM-001","latitude":20.0527,"longitude":-99.3467,"emergency_type":"incendio","timestamp":"2024-06-01T12:00:00Z"}'
+
+# O usando Docker:
+docker exec c5_mosquitto mosquitto_pub \
+  -t "c5/alerts/panic" \
+  -m '{"device_id":"SIM-001","latitude":20.0527,"longitude":-99.3467,"emergency_type":"secuestro","timestamp":"2024-06-01T12:00:00Z"}'
+```
+
+---
+
+## 🔥 Demo de tolerancia a fallos
+
+### Demostrar que las alertas NO se pierden si Notifications cae
+
+1. Conecta un cliente WebSocket a `ws://localhost:3004`
+2. Detén el servicio de notificaciones:
+   ```bash
+   docker compose stop notifications
+   ```
+3. Envía alertas (se encolan en Redis):
+   ```bash
+   curl -X POST http://localhost:8080/alert -H "Content-Type: application/json" \
+     -d '{"device_id":"TEST","latitude":20.05,"longitude":-99.34,"emergency_type":"robo_con_violencia"}'
+   ```
+4. Verifica que están en Redis:
+   ```bash
+   docker exec c5_redis redis-cli llen queue:notify_pending
+   ```
+5. Recupera el servicio:
+   ```bash
+   docker compose start notifications
+   ```
+6. Las alertas pendientes se entregan automáticamente al siguiente operador que se conecte.
+
+---
+
+## ⚖️ Demo de balanceo de carga
+
+```bash
+# Ver logs de las 3 instancias en tiempo real
+docker compose logs -f reception_1 reception_2 reception_3
+
+# En otra terminal, enviar varias alertas
+for i in {1..9}; do
+  curl -s -X POST http://localhost:8080/alert \
+    -H "Content-Type: application/json" \
+    -d "{\"device_id\":\"TEST-$i\",\"latitude\":20.05,\"longitude\":-99.34,\"emergency_type\":\"robo\"}" &
+done
+```
+
+Observa cómo las alertas se distribuyen entre las 3 instancias.
+
+---
+
+## 📱 Configurar ESP32
+
+Ver instrucciones completas en `esp32/README.md`.
+
+Pasos rápidos:
+1. Edita `esp32/panic_button.ino` con tu WiFi e IP
+2. Flashea con Arduino IDE
+3. Abre Monitor Serial (115200 baud)
+4. Presiona el botón para enviar alerta
+
+---
+
+## 📁 Estructura del proyecto
+
+```
+c5-alert-system/
+├── docker-compose.yaml          # ← Levanta TODO el sistema
+├── README.md                    # ← Este archivo
+├── services/
+│   ├── reception/               # Microservicio 1: MQTT + REST
+│   ├── geolocation/             # Microservicio 2: Zonas geográficas
+│   ├── priority/                # Microservicio 3: Clasificación gRPC
+│   ├── notifications/           # Microservicio 4: WebSockets
+│   └── history/                 # Microservicio 5: PostgreSQL
+├── esp32/
+│   ├── panic_button.ino         # Código Arduino para ESP32
+│   └── README.md
+├── nginx/
+│   └── nginx.conf               # Balanceador least_conn
+├── mosquitto/
+│   └── mosquitto.conf           # Broker MQTT
+├── postgres/
+│   ├── master-init.sh           # Init BD + tablas + replicación
+│   └── replica-init.sh          # Clonar desde master
+└── docs/
+    ├── architecture.md          # Diagrama de arquitectura
+    └── adr/
+        ├── ADR-001-redis-queue.md
+        ├── ADR-002-grpc-priority.md
+        └── ADR-003-postgresql-consistency.md
+```
+
+---
+
+## 🩺 Health checks
+
+```bash
+curl http://localhost:8080/health          # Nginx → Reception
+curl http://localhost:3004/health          # Notifications
+curl http://localhost:3005/health          # History
+```
+-e 
+
+--- FICHERO: ./esp32/README.md ---
+# ESP32 — Botón de Pánico C5
+
+## ¿Cómo obtiene la ubicación sin GPS físico?
+
+El ESP32 **escanea las redes WiFi visibles** (BSSID + señal) y consulta
+**Mozilla Location Services (MLS)** para convertir esas redes en coordenadas
+GPS reales. Funciona en cualquier lugar del mundo donde haya redes WiFi cercanas.
+
+Si MLS falla, usa **ip-api.com** como respaldo (geolocalización por IP).
+
+```
+ESP32 escanea WiFis cercanas
+        │
+        ▼
+Mozilla Location Services (gratuito, sin API key)
+        │
+        ▼
+Coordenadas lat/lon reales
+        │
+        ▼
+Publica alerta MQTT → Sistema C5
+```
+
+## Configuración antes de flashear
+
+Edita estas 4 líneas en `panic_button.ino`:
+
+```cpp
+const char* WIFI_SSID     = "TU_RED_WIFI";       // Tu red WiFi
+const char* WIFI_PASSWORD = "TU_PASSWORD_WIFI";   // Tu contraseña
+const char* MQTT_BROKER   = "192.168.1.100";      // IP de tu PC con Docker
+const char* DEVICE_ID     = "ESP32-001";          // ESP32-002 para el segundo
+```
+
+**¿Cómo saber tu IP?**
+- Windows: abre CMD → `ipconfig` → busca "Dirección IPv4"
+- Mac/Linux: `ifconfig | grep inet`
+
+## Instalar librerías en Arduino IDE
+
+1. `Sketch` → `Include Library` → `Manage Libraries`
+2. Buscar e instalar:
+   - **PubSubClient** by Nick O'Leary
+   - **ArduinoJson** by Benoit Blanchon
+   - HTTPClient ya viene incluida con el paquete ESP32
+
+## Instalar soporte ESP32
+
+`File` → `Preferences` → URLs adicionales:
+```
+https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+```
+Luego: `Tools` → `Board Manager` → buscar "esp32" → instalar
+
+Seleccionar placa: **ESP32 Dev Module**
+
+## Conexión del botón (si no usas el botón BOOT)
+
+```
+ESP32 GPIO 0  ──────┤ Botón ├────── GND
+```
+El botón BOOT ya está integrado en la mayoría de ESP32 DevKit (GPIO 0).
+
+## Uso — tipos de alerta
+
+Presiona el botón varias veces **dentro de 2 segundos**:
+
+| Pulsaciones | Tipo de emergencia | Prioridad |
+|:-----------:|---|:---------:|
+| 1 | `robo_con_violencia` | 🔴 CRÍTICO |
+| 2 | `accidente_grave` | 🟠 ALTO |
+| 3 | `incendio` | 🟠 ALTO |
+| 4 | `violencia_familiar` | 🟡 MEDIO |
+| 5 | `secuestro` | 🔴 CRÍTICO |
+
+## Indicadores LED
+
+| Patrón | Significado |
+|---|---|
+| LED fijo encendido | Sistema listo |
+| Parpadeo lento (3x) | Obteniendo ubicación GPS |
+| 3 parpadeos rápidos | ✅ Alerta enviada |
+| 10 parpadeos muy rápidos | ❌ Error al enviar |
+
+## Monitor Serial (115200 baud)
+
+```
+╔═══════════════════════════════════════╗
+║   C5 - Sistema de Alerta Ciudadana    ║
+║   ESP32 Botón de Pánico               ║
+║   Dispositivo: ESP32-001              ║
+╚═══════════════════════════════════════╝
+[WiFi] Conectando a MiRed... conectado! IP: 192.168.1.45
+[GPS] Escaneando redes WiFi para determinar ubicación...
+[GPS] Redes encontradas: 8
+[GPS] ✓ Ubicación: 20.052700, -99.346700 (precisión: ~35m)
+[Setup] ✓ Sistema listo
+
+[Button] Pulsación #1
+[ALERT] ══ ENVIANDO ALERTA ══
+[ALERT] Tipo: robo_con_violencia
+[GPS] Escaneando redes WiFi...
+[GPS] ✓ Ubicación: 20.052700, -99.346700
+[ALERT] ✓ Alerta enviada exitosamente!
+```
+-e 
+
+--- FICHERO: ./docs/adr/ADR-002-grpc-priority.md ---
+# ADR-002: gRPC para el servicio de Prioridad
+
+**Fecha:** 2025-06  
+**Estado:** Aceptado
+
+## Contexto
+
+El sistema requiere que al menos un par de microservicios se comunique vía gRPC con contrato `.proto` definido.
+
+## Decisión
+
+El microservicio de **Priority** expone un servidor gRPC en el puerto 50051 con el contrato `priority.proto`. Los servicios que necesiten clasificar una alerta pueden llamarlo directamente (sin pasar por Redis).
+
+## Alternativas consideradas
+
+| Alternativa | Pros | Contras |
+|---|---|---|
+| **gRPC** ✓ | Contrato fuerte, tipado, eficiente | Curva de aprendizaje, proto files |
+| REST/JSON | Simple, familiar | Sin schema enforcement, más verboso |
+| GraphQL | Flexible queries | Innecesariamente complejo para este caso |
+
+## Justificación
+
+- gRPC usa Protocol Buffers: mensajes más pequeños y rápidos que JSON
+- El contrato `.proto` documenta explícitamente la interfaz entre servicios
+- Cumple el requisito obligatorio del examen
+- La clasificación de prioridad es un caso ideal: input/output bien definidos
+
+## Contrato gRPC (priority.proto)
+
+```protobuf
+service PriorityService {
+  rpc ClassifyAlert (AlertRequest) returns (AlertResponse);
+}
+```
+
+## Consecuencias
+
+- Los clientes gRPC deben tener el mismo archivo `.proto`
+- Se mantiene también el procesador de cola Redis para el flujo principal (desacoplado)
+-e 
+
+--- FICHERO: ./docs/adr/ADR-003-postgresql-consistency.md ---
+# ADR-003: Modelo de consistencia PostgreSQL Maestro-Réplica
+
+**Fecha:** 2025-06  
+**Estado:** Aceptado
+
+## Contexto
+
+El sistema requiere PostgreSQL con replicación maestro-réplica, con lecturas dirigidas a la réplica. Se debe documentar y justificar el modelo de consistencia elegido.
+
+## Decisión
+
+Se implementa **consistencia eventual** con replicación asíncrona streaming.
+
+- **Escrituras** → PostgreSQL Master (:5432)
+- **Lecturas** → PostgreSQL Réplica (:5433)
+
+## Modelo de consistencia: Eventual
+
+### ¿Por qué eventual y no fuerte?
+
+| Criterio | Consistencia Fuerte (síncrona) | Consistencia Eventual (async) ✓ |
+|---|---|---|
+| Latencia escritura | Alta (espera confirmación réplica) | Baja |
+| Disponibilidad | Menor (si réplica falla, bloquea master) | Alta |
+| Pérdida de datos | 0 (en caso de crash master) | Pequeño lag |
+| Caso de uso | Transacciones financieras | Historial de alertas |
+
+### Justificación para este sistema
+
+El historial de alertas de emergencia es **append-only** y tiene tolerancia a lag de segundos. Lo crítico es que la alerta llegue a los operadores en tiempo real (via WebSocket), no que aparezca instantáneamente en el historial consultable. Un lag de 1-2 segundos en la réplica es completamente aceptable.
+
+## Configuración implementada
+
+```sql
+-- En master postgresql.conf
+wal_level = replica
+max_wal_senders = 3
+wal_keep_size = 64
+```
+
+```bash
+# En réplica: pg_basebackup para clonar del master
+```
+
+## Consecuencias
+
+- Las consultas al historial pueden tener un lag de milisegundos a segundos respecto al master
+- Si el master cae, la réplica puede ser promovida a master (failover manual)
+- El balanceo de lecturas reduce carga en el master, mejorando performance general
+-e 
+
+--- FICHERO: ./docs/adr/ADR-001-redis-queue.md ---
+# ADR-001: Uso de Redis como cola de mensajes entre microservicios
+
+**Fecha:** 2025-06  
+**Estado:** Aceptado
+
+## Contexto
+
+El sistema necesita comunicación asíncrona entre los 5 microservicios para garantizar que ninguna alerta se pierda, incluso si un servicio cae temporalmente.
+
+## Decisión
+
+Se utiliza **Redis con listas (LPUSH/BRPOP)** como cola de mensajes entre servicios, en lugar de un message broker dedicado (RabbitMQ, Kafka).
+
+## Alternativas consideradas
+
+| Alternativa | Pros | Contras |
+|---|---|---|
+| **Redis Listas** ✓ | Simple, ya requerido, baja latencia | Sin replay, sin grupos de consumidores nativos |
+| RabbitMQ | ACKs, exchanges flexibles | Otro servicio más, configuración compleja |
+| Apache Kafka | Replay, alto throughput | Overkill para este scale, complejo |
+
+## Justificación
+
+- Redis ya es parte del stack requerido (caché/cola en memoria)
+- La latencia objetivo (<2s end-to-end) se cumple fácilmente con Redis
+- El patrón LPUSH/BRPOP garantiza entrega FIFO y que las alertas no se pierden si un consumidor cae (quedan en la lista)
+- Para este proyecto académico, la simplicidad favorece la mantenibilidad
+
+## Consecuencias
+
+- Si Redis cae, las alertas en tránsito se pierden (aceptable con restart policy)
+- No hay reintentos automáticos nativos (se implementa con queue:notify_pending)
+- Modelo de consistencia: **eventual** — las alertas llegan a history con pequeño delay
+-e 
+
+--- FICHERO: ./docs/architecture.md ---
+# Arquitectura del Sistema C5 - Alerta Ciudadana
+
+## Diagrama de Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     DISPOSITIVOS IoT                            │
+│                                                                 │
+│  ┌──────────────┐    ┌──────────────┐                          │
+│  │  ESP32 #001  │    │  ESP32 #002  │  ... (más dispositivos)  │
+│  │  Botón pánico│    │  Botón pánico│                          │
+│  └──────┬───────┘    └──────┬───────┘                          │
+└─────────┼───────────────────┼─────────────────────────────────-┘
+          │  MQTT (puerto 1883)│
+          ▼                   ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  BROKER MQTT - Mosquitto                        │
+│              Topic: c5/alerts/#                                 │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ Suscripción MQTT
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              NGINX - Balanceador (least_conn) :8080             │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐           │
+│  │ Reception #1 │ │ Reception #2 │ │ Reception #3 │           │
+│  │    :3001     │ │    :3001     │ │    :3001     │           │
+│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘           │
+└─────────┼────────────────┼────────────────┼────────────────────┘
+          └────────────────┼────────────────┘
+                           │ LPUSH queue:alerts
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      REDIS :6379                                │
+│   queue:alerts → queue:geo_processed → queue:notify            │
+│                                      → queue:history           │
+│   (Tolerancia a fallos: queue:notify_pending)                   │
+└──────┬─────────────────────────────┬───────────────────────────┘
+       │ BRPOP                       │ BRPOP
+       ▼                             ▼
+┌──────────────┐              ┌──────────────────────────────────┐
+│ Geolocation  │              │         Priority :50051          │
+│    :3002     │              │    (gRPC Server + proto)         │
+│ REST/OpenAPI │              │  Clasifica: critical/high/medium │
+│ Zonas geo    │──────────────►  gRPC contrato priority.proto   │
+└──────────────┘   gRPC call  └──────────┬─────────────────────-┘
+                                         │ LPUSH queue:notify
+                                         │ LPUSH queue:history
+                       ┌─────────────────┼──────────────────┐
+                       │                 │                  │
+                       ▼                 ▼                  ▼
+              ┌───────────────┐  ┌───────────────┐  ┌──────────────┐
+              │ Notifications │  │    History    │  │   (futuro)   │
+              │    :3004      │  │    :3005      │  │              │
+              │  WebSockets   │  │  REST API     │  │              │
+              └───────┬───────┘  └───────┬───────┘  └──────────────┘
+                      │                 │
+                      ▼                 ▼
+              ┌───────────────┐  ┌──────────────────────────────────┐
+              │   Operadores  │  │        PostgreSQL                │
+              │  (Dashboard)  │  │  Master :5432 (escritura)        │
+              │  ws://:3004   │  │  Réplica :5433 (lectura)        │
+              └───────────────┘  └──────────────────────────────────┘
+```
+
+## Flujo de datos paso a paso
+
+1. **ESP32** presiona botón → publica JSON en MQTT topic `c5/alerts/panic`
+2. **Mosquitto** recibe y distribuye el mensaje a todos los suscriptores
+3. **Reception** (una de las 3 instancias, via Nginx) recibe la alerta, la valida y la encola en `Redis queue:alerts`
+4. **Geolocation** consume de `queue:alerts`, determina la zona geográfica y pasa a `queue:geo_processed`
+5. **Priority** consume de `queue:geo_processed`, clasifica la prioridad (gRPC disponible también) y publica en `queue:notify` y `queue:history`
+6. **Notifications** consume de `queue:notify` y hace broadcast via WebSocket a todos los operadores conectados
+7. **History** consume de `queue:history` y persiste en PostgreSQL Master; las lecturas van a la Réplica
+
+## Decisiones de Diseño
+
+Ver carpeta `adr/` para los Architecture Decision Records completos.
+-e 
+
+--- FICHERO: ./services/geolocation/package.json ---
+{
+  "name": "c5-geolocation",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2"
+  }
+}
+-e 
+
+--- FICHERO: ./services/notifications/package.json ---
+{
+  "name": "c5-notifications",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "ioredis": "^5.3.2"
+  }
+}
+-e 
+
+--- FICHERO: ./services/reception/package.json ---
+{
+  "name": "c5-reception",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mqtt": "^5.3.4",
+    "ioredis": "^5.3.2"
+  }
+}
+-e 
+
+--- FICHERO: ./services/priority/rules.json ---
+{
+  "_comment": "Reglas de prioridad configurables. Se recargan en caliente sin reiniciar.",
+  "_version": "1.0",
+
+  "critical": {
+    "label": "CRÍTICO",
+    "response_time_seconds": 180,
+    "color": "#FF0000",
+    "types": [
+      "secuestro",
+      "homicidio",
+      "tiroteo",
+      "explosion",
+      "robo_con_violencia",
+      "ataque_terrorista",
+      "rehenes"
+    ],
+    "reason": "Riesgo inmediato para la vida humana — respuesta en menos de 3 minutos"
+  },
+
+  "high": {
+    "label": "ALTO",
+    "response_time_seconds": 600,
+    "color": "#FF8C00",
+    "types": [
+      "incendio",
+      "accidente_grave",
+      "violencia_familiar",
+      "robo",
+      "agresion",
+      "accidente_vehicular",
+      "persona_herida"
+    ],
+    "reason": "Emergencia que requiere respuesta prioritaria — máximo 10 minutos"
+  },
+
+  "medium": {
+    "label": "MEDIO",
+    "response_time_seconds": 1800,
+    "color": "#FFD700",
+    "types": [
+      "vandalismo",
+      "ruido_excesivo",
+      "sospechoso",
+      "accidente_menor",
+      "pelea",
+      "persona_extraviada"
+    ],
+    "reason": "Situación que requiere atención — máximo 30 minutos"
+  },
+
+  "default_priority": "medium",
+  "default_reason": "Tipo de emergencia no catalogado — se asigna prioridad media por precaución"
+}
+-e 
+
+--- FICHERO: ./services/priority/package.json ---
+{
+  "name": "c5-priority",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2",
+    "@grpc/grpc-js": "^1.9.12",
+    "@grpc/proto-loader": "^0.7.10"
+  }
+}
+-e 
+
+--- FICHERO: ./services/history/package.json ---
+{
+  "name": "c5-history",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.3"
+  }
+}
+-e 
+
+--- FICHERO: ./postgres/replica-init.sh ---
+#!/bin/bash
+set -e
+
+# Esperar a que el master esté listo
+until pg_isready -h postgres_master -p 5432 -U c5admin; do
+  echo "Esperando al master..."
+  sleep 2
+done
+
+# Limpiar directorio de datos
+rm -rf /var/lib/postgresql/data/*
+
+# Clonar desde el master
+PGPASSWORD=replicasecret pg_basebackup \
+  -h postgres_master \
+  -U replicator \
+  -D /var/lib/postgresql/data \
+  -P -Xs -R
+
+echo "Réplica configurada correctamente"
+-e 
+
+--- FICHERO: ./postgres/master-init.sh ---
+#!/bin/bash
+set -e
+
+# Crear usuario de replicación
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+    CREATE USER replicator WITH REPLICATION ENCRYPTED PASSWORD 'replicasecret';
+EOSQL
+
+# Configurar pg_hba para replicación
+cat >> /var/lib/postgresql/data/pg_hba.conf <<-EOF
+host replication replicator 0.0.0.0/0 md5
+EOF
+
+# Configurar postgresql.conf para replicación
+cat >> /var/lib/postgresql/data/postgresql.conf <<-EOF
+wal_level = replica
+max_wal_senders = 3
+wal_keep_size = 64
+EOF
+
+# Crear tabla de alertas
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+    CREATE TABLE IF NOT EXISTS alerts (
+        id VARCHAR(100) PRIMARY KEY,
+        device_id VARCHAR(50) NOT NULL,
+        latitude DECIMAL(10, 8) NOT NULL,
+        longitude DECIMAL(11, 8) NOT NULL,
+        emergency_type VARCHAR(50) NOT NULL,
+        priority VARCHAR(10) NOT NULL,
+        zone VARCHAR(100),
+        status VARCHAR(20) DEFAULT 'received',
+        timestamp TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE INDEX idx_alerts_timestamp ON alerts(timestamp);
+    CREATE INDEX idx_alerts_priority ON alerts(priority);
+    CREATE INDEX idx_alerts_zone ON alerts(zone);
+EOSQL
+-e 
+
