@@ -184,10 +184,11 @@ async function processQueue() {
         `respuesta esperada: ${classification.response_time_seconds}s`
       );
 
-      // Publicar a notificaciones y historial en paralelo
+      // Publicar a notificaciones, historial y transcripción en paralelo
       await Promise.all([
-        redisPub.lpush("queue:notify",  JSON.stringify(processed)),
-        redisPub.lpush("queue:history", JSON.stringify(processed)),
+        redisPub.lpush("queue:notify",              JSON.stringify(processed)),
+        redisPub.lpush("queue:history",             JSON.stringify(processed)),
+        redisPub.lpush("queue:transcription_input", JSON.stringify(processed)),
       ]);
 
     } catch (err) {

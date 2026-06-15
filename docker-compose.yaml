@@ -221,3 +221,21 @@ services:
     networks:
       - c5net
     restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MICROSERVICIO 6: TRANSCRIPCIÓN DE AUDIO
+  # ─────────────────────────────────────────────
+
+  transcription:
+    build: ./services/transcription
+    container_name: c5_transcription
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - CAM_AUDIO_URL=http://192.168.2.23:8080/audio.wav
+    depends_on:
+      - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - c5net
+    restart: unless-stopped
